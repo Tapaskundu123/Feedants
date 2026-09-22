@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useRef } from 'react';
 import {
   View,
   ScrollView,
@@ -9,6 +9,13 @@ import {
   ActivityIndicator,
   RefreshControl,
   Linking,
+  TextInput,
+  Modal,
+  KeyboardAvoidingView,
+  Platform,
+  TouchableWithoutFeedback,
+  Keyboard,
+  Image,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -29,7 +36,7 @@ import { useRegistration } from '../hooks/useRegistration';
 import { COLORS, SPACING, FONT_SIZES, FONT_WEIGHTS, RADIUS, SHADOWS } from '../theme';
 import { CompetitionState } from '../types';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { authApi } from '../api/client';
+import { authApi, competitionApi } from '../api/client';
 
 // ─── Auth Modal (demo login) ──────────────────────────────────
 interface AuthModalProps {
@@ -171,6 +178,11 @@ export const CompetitionDetailScreen: React.FC<Props> = ({
   const [showAuth, setShowAuth] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
+  // ─── Upload submission dialog state ──────────────────────
+  const [showUploadModal, setShowUploadModal] = useState(false);
+  const [submissionUrl, setSubmissionUrl] = useState('');
+  const [uploadLoading, setUploadLoading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
 
   const { data, loading, error, refetch } = useCompetition(competitionId);
   const { registering, register, error: regError, clearError } = useRegistration(
@@ -200,6 +212,47 @@ export const CompetitionDetailScreen: React.FC<Props> = ({
     await AsyncStorage.removeItem('auth_token');
     setIsLoggedIn(false);
     refetch();
+  };
+
+  // ─── Upload Submission ────────────────────────────────────
+  const handleUploadSubmit = async () => {
+    const url = submissionUrl.trim();
+    if (!url) {
+      setUploadError('Please enter a video URL.');
+      return;
+    }
+    if (!url.startsWith('http://') && !url.startsWith('https://')) {
+      setUploadError('URL must start with http:// or https://');
+      return;
+    }
+    setUploadLoading(true);
+    setUploadError(null);
+    try {
+      await competitionApi.submit(competitionId, url);
+      setShowUploadModal(false);
+      setSubmissionUrl('');
+      Alert.alert(
+        '🎉 Submission Received!',
+        'Your entry has been submitted successfully. You will receive results once judging is complete.',
+        [{ text: 'OK', onPress: refetch }]
+      );
+    } catch (err: any) {
+      // Map backend error codes to friendly messages
+      const msg: string = err.message || '';
+      if (msg.includes('not opened yet')) {
+        setUploadError('The submission window has not opened yet. Please wait.');
+      } else if (msg.includes('window has closed') || msg.includes('closed')) {
+        setUploadError('The submission deadline has passed.');
+      } else if (msg.includes('already submitted')) {
+        setUploadError('You have already submitted an entry.');
+      } else if (msg.includes('not found')) {
+        setUploadError('Registration not found. Please make sure you are registered.');
+      } else {
+        setUploadError(msg || 'Submission failed. Please try again.');
+      }
+    } finally {
+      setUploadLoading(false);
+    }
   };
 
   const handleCTAPress = async () => {
@@ -239,13 +292,9 @@ export const CompetitionDetailScreen: React.FC<Props> = ({
 
       case 'REGISTERED':
       case 'REGISTERED_SUBMISSION_OPEN': {
-        Alert.alert(
-          'Upload Submission',
-          'In the full app, this opens the video/file upload flow.',
-          [
-            { text: 'OK' },
-          ]
-        );
+        setSubmissionUrl('');
+        setUploadError(null);
+        setShowUploadModal(true);
         break;
       }
 
@@ -288,6 +337,22 @@ export const CompetitionDetailScreen: React.FC<Props> = ({
   const { competition, competitionState, registrationStatus } = data;
   const isRegistered = registrationStatus !== null;
 
+  // ─── Smart countdown: target & label based on state ─────
+  const countdownTarget = (
+    competitionState === 'REGISTERED_SUBMISSION_OPEN' ||
+    competitionState === 'SUBMITTED'
+  )
+    ? competition.dates.submissionEnd
+    : competition.dates.registrationClose;
+
+  const countdownLabel = (
+    competitionState === 'REGISTERED_SUBMISSION_OPEN'
+  )
+    ? 'Submission window closes in'
+    : competitionState === 'SUBMITTED'
+    ? 'Results will be announced'
+    : 'Registration closes in';
+
   return (
     <SafeAreaView style={styles.root} edges={['top']}>
       {/* Auth modal */}
@@ -296,6 +361,69 @@ export const CompetitionDetailScreen: React.FC<Props> = ({
         onLogin={handleLogin}
         onClose={() => setShowAuth(false)}
       />
+
+      {/* ── Upload Submission Modal ── */}
+      <Modal
+        visible={showUploadModal}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setShowUploadModal(false)}
+      >
+        <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
+          <View style={styles.modalOverlay}>
+            <KeyboardAvoidingView
+              behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+              keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 24}
+              style={styles.kvWrapper}
+            >
+              <View style={styles.uploadModal}>
+                {/* Drag handle */}
+                <View style={styles.dragHandle} />
+                <Text style={styles.uploadTitle}>Upload Submission</Text>
+                <Text style={styles.uploadSub}>
+                  Paste your video URL below (YouTube, Vimeo, Google Drive, etc.)
+                </Text>
+                <TextInput
+                  style={styles.urlInput}
+                  placeholder="https://youtube.com/watch?v=..."
+                  placeholderTextColor={COLORS.textMuted}
+                  value={submissionUrl}
+                  onChangeText={(t) => { setSubmissionUrl(t); setUploadError(null); }}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  keyboardType="url"
+                  returnKeyType="done"
+                  onSubmitEditing={Keyboard.dismiss}
+                />
+                {uploadError ? (
+                  <Text style={styles.uploadError}>{uploadError}</Text>
+                ) : null}
+                <View style={styles.uploadActions}>
+                  <TouchableOpacity
+                    style={styles.cancelBtn}
+                    onPress={() => setShowUploadModal(false)}
+                    activeOpacity={0.7}
+                  >
+                    <Text style={styles.cancelBtnText}>Cancel</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.submitBtn, uploadLoading && styles.submitBtnDisabled]}
+                    onPress={handleUploadSubmit}
+                    disabled={uploadLoading}
+                    activeOpacity={0.8}
+                  >
+                    {uploadLoading ? (
+                      <ActivityIndicator size="small" color={COLORS.white} />
+                    ) : (
+                      <Text style={styles.submitBtnText}>Submit Entry</Text>
+                    )}
+                  </TouchableOpacity>
+                </View>
+              </View>
+            </KeyboardAvoidingView>
+          </View>
+        </TouchableWithoutFeedback>
+      </Modal>
 
       {/* Demo auth switcher bar */}
       <View style={styles.devBar}>
@@ -334,6 +462,35 @@ export const CompetitionDetailScreen: React.FC<Props> = ({
 
         <View style={styles.divider} />
 
+        {/* ── Registration / Submission Status Banner ── */}
+        {competitionState === 'REGISTERED' && (
+          <View style={[styles.statusBanner, styles.statusBannerRegistered]}>
+            <Text style={styles.statusBannerIcon}>✅</Text>
+            <View>
+              <Text style={styles.statusBannerTitle}>You're Registered!</Text>
+              <Text style={styles.statusBannerSub}>Submission window opens soon.</Text>
+            </View>
+          </View>
+        )}
+        {competitionState === 'REGISTERED_SUBMISSION_OPEN' && (
+          <View style={[styles.statusBanner, styles.statusBannerSubmit]}>
+            <Text style={styles.statusBannerIcon}>🎬</Text>
+            <View>
+              <Text style={styles.statusBannerTitle}>Submission Window is Open!</Text>
+              <Text style={styles.statusBannerSub}>Tap "Upload Submission" below to submit your entry.</Text>
+            </View>
+          </View>
+        )}
+        {competitionState === 'SUBMITTED' && (
+          <View style={[styles.statusBanner, styles.statusBannerDone]}>
+            <Text style={styles.statusBannerIcon}>🏆</Text>
+            <View>
+              <Text style={styles.statusBannerTitle}>Entry Submitted!</Text>
+              <Text style={styles.statusBannerSub}>Your submission is under review. Results coming soon.</Text>
+            </View>
+          </View>
+        )}
+
         {/* ── Prize + Spots ── */}
         <PrizeEntryRow competition={competition} />
 
@@ -344,10 +501,10 @@ export const CompetitionDetailScreen: React.FC<Props> = ({
 
         <View style={styles.divider} />
 
-        {/* ── Countdown ── */}
+        {/* ── Smart Countdown ── */}
         <CountdownTimer
-          targetDate={competition.dates.registrationClose}
-          label="Registration closes in"
+          targetDate={countdownTarget}
+          label={countdownLabel}
         />
 
         {/* ── Important Dates ── */}
@@ -376,26 +533,56 @@ export const CompetitionDetailScreen: React.FC<Props> = ({
           disclaimer={competition.disclaimer}
         />
 
-        {/* ── Prize Money Info ── */}
-        <View style={styles.prizeInfoCard}>
-          <View style={styles.prizeInfoLeft}>
-            <View style={styles.prizeInfoIcon}>
-              <Ionicons name="play" size={14} color={COLORS.white} />
+        {/* ── How will you receive prize money? (Video Guide) ── */}
+        <TouchableOpacity
+          style={styles.prizeVideoCard}
+          onPress={() => {
+            Alert.alert(
+              'How Prize Money is Distributed',
+              'Winners are announced on the result date. Prize money is directly credited to your verified bank account or UPI ID within 24-48 hours. No hidden fees or deductions.',
+              [{ text: 'Got It', style: 'default' }]
+            );
+          }}
+          activeOpacity={0.8}
+        >
+          <View style={styles.prizeVideoLeft}>
+            <View style={styles.playIconCircle}>
+              <Ionicons name="play" size={15} color={COLORS.white} />
             </View>
-            <View>
-              <Text style={styles.prizeInfoTitle}>How will you receive prize money?</Text>
-              <Text style={styles.prizeInfoSub}>Watch video to know more</Text>
+            <View style={styles.prizeVideoText}>
+              <Text style={styles.prizeVideoTitle}>How will you receive prize money?</Text>
+              <Text style={styles.prizeVideoSub}>Watch video to know more</Text>
             </View>
           </View>
-          <View style={styles.prizeInfoRight}>
-            <View style={styles.secureRow}>
-              <Ionicons name="shield-checkmark-outline" size={14} color={COLORS.primary} />
-              <Text style={styles.prizeInfoSmall}>Refund policy</Text>
+          <View style={styles.watchPill}>
+            <Text style={styles.watchText}>Watch</Text>
+            <Ionicons name="chevron-forward" size={13} color={COLORS.primary} />
+          </View>
+        </TouchableOpacity>
+
+        {/* ── Separate Policy & Payout Trust Row ── */}
+        <View style={styles.policyRowContainer}>
+          <TouchableOpacity
+            style={styles.policyCard}
+            onPress={() => {
+              Alert.alert(
+                'Refund Policy',
+                '• 100% full refund if competition is cancelled by organizers.\n• Refund processed within 3-5 business days to original payment method.\n• Registrations cannot be refunded once submission window closes.',
+                [{ text: 'Close', style: 'cancel' }]
+              );
+            }}
+            activeOpacity={0.7}
+          >
+            <View style={styles.policyCardLeft}>
+              <Ionicons name="shield-checkmark-outline" size={15} color="#059669" />
+              <Text style={styles.policyCardText}>Refund Policy</Text>
             </View>
-            <View style={styles.secureRow}>
-              <Ionicons name="shield-outline" size={14} color={COLORS.primary} />
-              <Text style={styles.prizeInfoSmall}>Secure payments powered by Razorpay</Text>
-            </View>
+            <Ionicons name="chevron-forward" size={14} color={COLORS.textMuted} />
+          </TouchableOpacity>
+
+          <View style={styles.payoutCard}>
+            <Ionicons name="card-outline" size={15} color={COLORS.primary} />
+            <Text style={styles.payoutCardText}>Direct bank transfer</Text>
           </View>
         </View>
 
@@ -403,6 +590,43 @@ export const CompetitionDetailScreen: React.FC<Props> = ({
 
         {/* ── Referral ── */}
         <ReferralCard competitionId={competitionId} isLoggedIn={isLoggedIn} />
+
+        {/* ── Secure Payment & Razorpay Guarantee Banner ── */}
+        <View style={styles.secureTrustCard}>
+          <View style={styles.secureTrustHeader}>
+            <View style={styles.secureTrustLeft}>
+              <View style={styles.secureShieldIcon}>
+                <Ionicons name="shield-checkmark" size={18} color="#059669" />
+              </View>
+              <View>
+                <Text style={styles.secureTrustTitle}>100% Secure Payment</Text>
+                <Text style={styles.secureTrustSub}>Trusted & encrypted transactions</Text>
+              </View>
+            </View>
+            <View style={styles.secureTrustRight}>
+              <Text style={styles.securePoweredBy}>Powered by</Text>
+              <Image
+                source={require('../../assets/razorpay-logo.png')}
+                style={styles.secureTrustLogo}
+                resizeMode="contain"
+              />
+            </View>
+          </View>
+          <View style={styles.secureTrustPills}>
+            <View style={styles.securePill}>
+              <Ionicons name="lock-closed-outline" size={12} color={COLORS.textSecondary} />
+              <Text style={styles.securePillText}>256-Bit SSL</Text>
+            </View>
+            <View style={styles.securePill}>
+              <Ionicons name="flash-outline" size={12} color="#D97706" />
+              <Text style={styles.securePillText}>Instant Booking</Text>
+            </View>
+            <View style={styles.securePill}>
+              <Ionicons name="card-outline" size={12} color={COLORS.primary} />
+              <Text style={styles.securePillText}>UPI / Cards / NetBanking</Text>
+            </View>
+          </View>
+        </View>
 
         {/* ── Hear from Users ── */}
         <View style={styles.hearRow}>
@@ -508,27 +732,28 @@ const styles = StyleSheet.create({
     fontWeight: FONT_WEIGHTS.bold,
     fontSize: FONT_SIZES.md,
   },
-  prizeInfoCard: {
+  // ── Prize Video Card ─────────────────────────────────────────
+  prizeVideoCard: {
     backgroundColor: COLORS.white,
     marginHorizontal: SPACING.base,
-    marginVertical: SPACING.sm,
+    marginTop: SPACING.sm,
+    marginBottom: SPACING.xs,
     borderRadius: RADIUS.lg,
     padding: SPACING.md,
     flexDirection: 'row',
-    justifyContent: 'space-between',
     alignItems: 'center',
+    justifyContent: 'space-between',
     borderWidth: 1,
     borderColor: COLORS.border,
-    gap: SPACING.sm,
     ...SHADOWS.sm,
   },
-  prizeInfoLeft: {
+  prizeVideoLeft: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: SPACING.sm,
     flex: 1,
   },
-  prizeInfoIcon: {
+  playIconCircle: {
     width: 36,
     height: 36,
     borderRadius: RADIUS.full,
@@ -537,29 +762,164 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     flexShrink: 0,
   },
-  prizeInfoTitle: {
+  prizeVideoText: {
+    flex: 1,
+  },
+  prizeVideoTitle: {
     fontSize: FONT_SIZES.sm,
     fontWeight: FONT_WEIGHTS.semiBold,
     color: COLORS.textPrimary,
   },
-  prizeInfoSub: {
+  prizeVideoSub: {
     fontSize: FONT_SIZES.xs,
     color: COLORS.primary,
+    marginTop: 2,
   },
-  prizeInfoRight: {
+  watchPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    backgroundColor: COLORS.primaryLight,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: RADIUS.full,
+    marginLeft: SPACING.xs,
+  },
+  watchText: {
+    fontSize: FONT_SIZES.xs,
+    fontWeight: FONT_WEIGHTS.semiBold,
+    color: COLORS.primary,
+  },
+  // ── Separate Policy & Payout Trust Row ────────────────────────
+  policyRowContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginHorizontal: SPACING.base,
+    marginBottom: SPACING.sm,
     gap: SPACING.xs,
-    flexShrink: 0,
-    maxWidth: 140,
   },
-  secureRow: {
+  policyCard: {
+    flex: 1,
+    backgroundColor: COLORS.white,
+    borderRadius: RADIUS.md,
+    paddingHorizontal: SPACING.sm,
+    paddingVertical: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    ...SHADOWS.sm,
+  },
+  policyCardLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+  },
+  policyCardText: {
+    fontSize: FONT_SIZES.xs,
+    fontWeight: FONT_WEIGHTS.medium,
+    color: COLORS.textPrimary,
+  },
+  payoutCard: {
+    flex: 1,
+    backgroundColor: COLORS.white,
+    borderRadius: RADIUS.md,
+    paddingHorizontal: SPACING.sm,
+    paddingVertical: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    ...SHADOWS.sm,
+  },
+  payoutCardText: {
+    fontSize: FONT_SIZES.xs,
+    fontWeight: FONT_WEIGHTS.medium,
+    color: COLORS.textPrimary,
+  },
+  // ── Secure Payment Trust Banner ──────────────────────────────
+  secureTrustCard: {
+    backgroundColor: COLORS.white,
+    marginHorizontal: SPACING.base,
+    marginTop: 4,
+    marginBottom: SPACING.xs,
+    borderRadius: RADIUS.lg,
+    padding: SPACING.md,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    ...SHADOWS.sm,
+  },
+  secureTrustHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  secureTrustLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SPACING.sm,
+    flex: 1,
+  },
+  secureShieldIcon: {
+    width: 34,
+    height: 34,
+    borderRadius: RADIUS.full,
+    backgroundColor: '#ECFDF5',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  secureTrustTitle: {
+    fontSize: FONT_SIZES.sm,
+    fontWeight: FONT_WEIGHTS.bold,
+    color: COLORS.textPrimary,
+  },
+  secureTrustSub: {
+    fontSize: 11,
+    color: COLORS.textSecondary,
+    marginTop: 1,
+  },
+  secureTrustRight: {
+    alignItems: 'flex-end',
+    gap: 2,
+    marginLeft: SPACING.sm,
+  },
+  securePoweredBy: {
+    fontSize: 9,
+    color: COLORS.textMuted,
+    fontWeight: FONT_WEIGHTS.medium,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  secureTrustLogo: {
+    width: 82,
+    height: 18,
+  },
+  secureTrustPills: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SPACING.xs,
+    marginTop: SPACING.sm,
+    paddingTop: SPACING.sm,
+    borderTopWidth: 1,
+    borderTopColor: '#F1F5F9',
+  },
+  securePill: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,
+    backgroundColor: '#F8FAFC',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: RADIUS.full,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
   },
-  prizeInfoSmall: {
-    fontSize: FONT_SIZES.xs,
+  securePillText: {
+    fontSize: 10,
     color: COLORS.textSecondary,
-    flex: 1,
+    fontWeight: FONT_WEIGHTS.medium,
   },
   hearRow: {
     backgroundColor: COLORS.white,
@@ -601,5 +961,129 @@ const styles = StyleSheet.create({
   adText: {
     fontSize: FONT_SIZES.sm,
     color: COLORS.textMuted,
+  },
+  // ── Status Banners ───────────────────────────────────────────
+  statusBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SPACING.sm,
+    marginHorizontal: SPACING.base,
+    marginBottom: SPACING.xs,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.sm,
+    borderRadius: RADIUS.md,
+  },
+  statusBannerRegistered: {
+    backgroundColor: '#DCFCE7',
+    borderWidth: 1,
+    borderColor: '#86EFAC',
+  },
+  statusBannerSubmit: {
+    backgroundColor: '#DBEAFE',
+    borderWidth: 1,
+    borderColor: '#93C5FD',
+  },
+  statusBannerDone: {
+    backgroundColor: '#FEF9C3',
+    borderWidth: 1,
+    borderColor: '#FDE047',
+  },
+  statusBannerIcon: {
+    fontSize: 20,
+  },
+  statusBannerTitle: {
+    fontSize: FONT_SIZES.sm,
+    fontWeight: FONT_WEIGHTS.bold,
+    color: COLORS.textPrimary,
+  },
+  statusBannerSub: {
+    fontSize: FONT_SIZES.xs,
+    color: COLORS.textSecondary,
+    marginTop: 2,
+  },
+  // ── Upload Modal ─────────────────────────────────────────────
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'flex-end',
+  },
+  kvWrapper: {
+    justifyContent: 'flex-end',
+  },
+  uploadModal: {
+    backgroundColor: COLORS.white,
+    borderTopLeftRadius: RADIUS.xl,
+    borderTopRightRadius: RADIUS.xl,
+    padding: SPACING.xl,
+    gap: SPACING.md,
+    paddingBottom: Platform.OS === 'ios' ? 40 : SPACING.xl,
+  },
+  dragHandle: {
+    width: 40,
+    height: 4,
+    backgroundColor: COLORS.border,
+    borderRadius: 2,
+    alignSelf: 'center',
+    marginBottom: SPACING.xs,
+  },
+  uploadTitle: {
+    fontSize: FONT_SIZES.xl,
+    fontWeight: FONT_WEIGHTS.bold,
+    color: COLORS.textPrimary,
+  },
+  uploadSub: {
+    fontSize: FONT_SIZES.sm,
+    color: COLORS.textSecondary,
+    marginTop: -SPACING.xs,
+  },
+  urlInput: {
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: RADIUS.md,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.sm,
+    fontSize: FONT_SIZES.sm,
+    color: COLORS.textPrimary,
+    backgroundColor: COLORS.background,
+  },
+  uploadError: {
+    fontSize: FONT_SIZES.sm,
+    color: COLORS.error,
+    backgroundColor: '#FEE2E2',
+    padding: SPACING.sm,
+    borderRadius: RADIUS.sm,
+  },
+  uploadActions: {
+    flexDirection: 'row',
+    gap: SPACING.sm,
+    marginTop: SPACING.xs,
+  },
+  cancelBtn: {
+    flex: 1,
+    paddingVertical: SPACING.sm,
+    borderRadius: RADIUS.md,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    alignItems: 'center',
+  },
+  cancelBtnText: {
+    fontSize: FONT_SIZES.md,
+    fontWeight: FONT_WEIGHTS.medium,
+    color: COLORS.textSecondary,
+  },
+  submitBtn: {
+    flex: 2,
+    paddingVertical: SPACING.sm,
+    borderRadius: RADIUS.md,
+    backgroundColor: COLORS.primary,
+    alignItems: 'center',
+  },
+  submitBtnDisabled: {
+    opacity: 0.6,
+  },
+  submitBtnText: {
+    fontSize: FONT_SIZES.md,
+    fontWeight: FONT_WEIGHTS.bold,
+    color: COLORS.white,
   },
 });

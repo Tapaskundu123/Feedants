@@ -1,13 +1,13 @@
 import mongoose, { Document, Schema } from 'mongoose';
 
 // ─── Sub-schemas ──────────────────────────────────────────────
-interface IReward {
+export interface IReward {
   position: number;
   label: string;
   amount: number;
 }
 
-interface IJudge {
+export interface IJudge {
   name: string;
   title: string;
   experience: string;
@@ -15,14 +15,14 @@ interface IJudge {
   introVideoUrl: string;
 }
 
-interface ICompetitionDates {
+export interface ICompetitionDates {
   registrationClose: Date;
   submissionStart: Date;
   submissionEnd: Date;
   resultDate: Date;
 }
 
-interface IPreviousWinner {
+export interface IPreviousWinner {
   name: string;
   rank: string;
   photoUrl: string;

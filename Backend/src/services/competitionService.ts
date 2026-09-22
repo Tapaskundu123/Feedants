@@ -29,7 +29,7 @@ export const computeCompetitionState = (
   return 'OPEN';
 };
 
-// ─── Get single competition with user state ───────────────────
+// ─── Get single competition with user state ─────────────────
 export const getCompetitionWithState = async (
   competitionId: string,
   userId?: string
@@ -38,8 +38,12 @@ export const getCompetitionWithState = async (
     throw createError('Invalid competition ID', 400);
   }
 
-  const competition = await Competition.findById(competitionId).lean({ virtuals: true });
+  const competition = await Competition.findById(competitionId).lean();
   if (!competition) throw createError('Competition not found', 404);
+
+  // Explicitly compute virtuals — .lean() does not reliably serialize them via JSON
+  const remainingSpots = Math.max(0, competition.totalSpots - competition.bookedSpots);
+  const isFull = competition.bookedSpots >= competition.totalSpots;
 
   let registrationStatus: string | null = null;
   let registrationId: string | null = null;
@@ -61,7 +65,7 @@ export const getCompetitionWithState = async (
   );
 
   return {
-    competition,
+    competition: { ...competition, remainingSpots, isFull },
     registrationStatus,
     registrationId,
     competitionState,
@@ -93,7 +97,7 @@ export const registerForCompetition = async (
       $expr: { $lt: ['$bookedSpots', '$totalSpots'] },
     },
     { $inc: { bookedSpots: 1 } },
-    { new: true }
+    { returnDocument: 'after' }
   );
 
   if (!updated) {
