@@ -120,8 +120,8 @@ Password for both: `Password123!`
 
 ```env
 PORT=5000
-MONGODB_URI=mongodb://localhost:27017/feedants
-JWT_SECRET=your_secret_here
+MONGODB_URI=mongodb+srv://tapaskundu3762_db_user:GB7wABJhsLGtnlL0@cluster0.fgdpdnm.mongodb.net/?appName=Cluster0
+JWT_SECRET=feedants_super_secret_jwt_key_change_in_production
 JWT_EXPIRES_IN=7d
 NODE_ENV=development
 CORS_ORIGIN=*
